@@ -10,16 +10,15 @@ system('cls')
 
 ## Data input
 
-# material = 'AlSi10Mg'
-material = '6082-T6'
+material = 'AlSi10Mg'
+# material = '6082-T6'
 
-max_coolant_pressure = 40 # regen channel pressure (bar)
+channel_dp = 40 # pressure difference across the firewall (bar) - assume to be constant
 
-t_w = 1e-3 * 0.7 # wall thickness (m)
+t_w = 1e-3 * 0.6 # wall thickness (m)
 
-# channel_arc_angle = 9 # deg
-channel_width = 1e-3 * 0.4 # m
-
+channel_arc_angle = 7.5 # deg
+# channel_width = 1e-3 * 0.4 # m
 
 ## Equations
 calc_channel_width_angle = lambda r, t_w, angle: 2 * (r + t_w) * np.sin(np.deg2rad(angle/2)) # m
@@ -30,8 +29,7 @@ calc_tangential_pressure_stress = np.vectorize(temp_pressure_stress)
 calc_crit_long_buckling_stress = np.vectorize(lambda r, E, t_w, v: E * t_w / (r * np.sqrt(3*(1 - v**2))))
 calc_von_mises_stress = np.vectorize(lambda tang_t, tang_p, long_t: np.sqrt(0.5 * ((tang_t + tang_p - long_t)**2 + (long_t)**2 + (tang_t + tang_p)**2)))
 
-#############################################################################################
-# Read values from RPA
+## Read values from RPA
 columns = ['axial_pos', 'radius', 'conv_hf_coeff', 'q_conv', 'q_rad', 'q_total', 'tbc_temp', 
            'firewall_temp', 'coolant_wall_temp', 'coolant_temp', 'channel_pressure', 
            'coolant_velocity', 'coolant_density']
@@ -50,9 +48,8 @@ for line in lines:
     data.append(values)
 
 df = pd.DataFrame(data, columns=columns)
-#############################################################################################
 
-# Read values into arrays
+## Read values into arrays
 axial_pos = df["axial_pos"].to_numpy(dtype=np.float64) * 1e-3 # m
 radius = df["radius"].to_numpy(dtype=np.float64) *1e-3 # m
 conv_hf_coeff = df["conv_hf_coeff"].to_numpy(dtype=np.float64) # W/m^2K
@@ -150,7 +147,7 @@ yield_strength[valid_temps] = np.interp(firewall_temp[valid_temps], yield_temps,
 ## Calculations
 tangential_thermal_stress = calc_tangential_thermal_stress(q_total, youngs_modulus, cte, t_w, v, conductivity) # Pa
 longitudinal_thermal_stress = calc_longitudinal_thermal_stress(firewall_temp, coolant_wall_temp, youngs_modulus, cte) # Pa
-tangential_pressure_stress = calc_tangential_pressure_stress(t_w, channel_width, max_coolant_pressure) # Pa
+tangential_pressure_stress = calc_tangential_pressure_stress(t_w, channel_width, channel_dp) # Pa
 crit_long_buckling_stress = calc_crit_long_buckling_stress(radius, youngs_modulus, t_w, v) # Pa
 von_mises_stress = calc_von_mises_stress(tangential_thermal_stress, tangential_pressure_stress, longitudinal_thermal_stress) # MPa
 
@@ -180,7 +177,8 @@ print(f'Coolant temperature rise: {np.max(coolant_temp) - np.min(coolant_temp):.
 print(f'Min coolant density: {np.min(coolant_density):.1f} kg/m^3') # Useful to check if coolant is boiling in channels
 
 # Plots
-fig, ax = plt.subplots(2, 2, figsize=(15, 10))
+fig, ax = plt.subplots(2, 2, figsize=(15, 10), sharex=True)
+fig.suptitle(f"Engine Thermals - {material}")
 ax1 = ax[0,0]
 ax2 = ax1.twinx()
 
@@ -229,7 +227,7 @@ ax5 = ax[0,1]
 ax6 = ax5.twinx()
 ax5.plot(axial_pos*1e3, yield_sf, color="tab:red", label="Safety Factor (Yield)")
 ax6.plot(axial_pos*1e3, buckling_sf, color="tab:blue", label="Safety Factor (Buckling)")
-ax6.set_ylabel("Safety Factor (Buckling)")
+ax6.set_ylabel("Safety Factor (Buckling)", color="tab:blue")
 ax5.set_ylabel("Safety Factor (Yield)")
 ax5.set_xlabel("Axial Distance From Throat (mm)")
 ax6.set_ylim(0, None)
@@ -242,7 +240,6 @@ if yield_first:
 else:
     ax5.set_title(f"Minimum Safety Factor: {min_sf:.3f} by Buckling")
     ax6.axhline(y=min_sf, color='tab:blue', linestyle='--', label="Minimum Safety Factor")
-
 legend_lines = ax5.lines + ax6.lines
 legend_labels = [l.get_label() for l in legend_lines]
 ax5.legend(legend_lines, legend_labels, loc='best')
