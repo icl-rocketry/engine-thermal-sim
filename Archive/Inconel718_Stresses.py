@@ -28,6 +28,10 @@ x = np.array([21, 93, 204, 316, 427, 538, 649, 760, 871, 954]) # E
 y = np.array([208, 205, 202, 194, 186, 179, 172, 162, 127, 78]) * 1e9 # E
 x2 = np.array([93, 204, 316, 427, 538, 649, 760]) # Ys
 y2 = np.array([1172, 1124, 1096, 1076, 1069, 1027, 758]) * 1e6 # Ys
+a = 16 * 10 ** -6 # CTE
+k = 12 # Update this
+v = 0.28
+
 
 coefficients = np.polyfit(x, y, 2) # E
 coefficients2 = np.polyfit(x2, y2, 2) # Ys
@@ -41,9 +45,7 @@ C2 = float(coefficients2[2]) # Ys
 
 
 
-a = 16 * 10 ** -6 # CTE
-k = 12 # Update this
-v = 0.28
+
 pc = 40 # regen channel pressure
 t_w = (10 ** -3) * 0.4
 h_rib = (10 ** -3) * 1
