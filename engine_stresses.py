@@ -7,15 +7,15 @@ channel_arc_angle = None
 channel_width = None
 system('cls')
 
-
 ## Data input
 
-material = 'AlSi10Mg'
+# material = 'AlSi10Mg'
 # material = '6082-T6'
+material = 'Inconel718'
 
 channel_dp = 40 # pressure difference across the firewall (bar) - assume to be constant
 
-t_w = 1e-3 * 0.6 # wall thickness (m)
+t_w = 1e-3 * 0.4 # wall thickness (m)
 
 channel_arc_angle = 7.5 # deg
 # channel_width = 1e-3 * 0.4 # m
@@ -152,11 +152,11 @@ crit_long_buckling_stress = calc_crit_long_buckling_stress(radius, youngs_modulu
 von_mises_stress = calc_von_mises_stress(tangential_thermal_stress, tangential_pressure_stress, longitudinal_thermal_stress) # MPa
 
 yield_sf = np.divide(yield_strength, von_mises_stress) # Safety Factor (Yield)
-buckling_sf = np.divide(crit_long_buckling_stress, longitudinal_thermal_stress) # Safety Factor (Buckling)
-strain = np.divide(von_mises_stress, youngs_modulus) * 100 # Strain (%)
+buckling_sf = np.divide(crit_long_buckling_stress, longitudinal_thermal_stress, out=np.full_like(longitudinal_thermal_stress, np.nan), where=longitudinal_thermal_stress!=0) # Safety Factor (Buckling)
+strain = np.divide(von_mises_stress, youngs_modulus, out=np.full_like(youngs_modulus, np.nan), where=youngs_modulus!=0) * 100 # Strain (%)
 
-min_sf_yield = np.min(yield_sf)
-min_sf_buckling = np.min(buckling_sf)
+min_sf_yield = np.min(yield_sf[~np.isnan(yield_sf)]) if np.any(~np.isnan(yield_sf)) else 0
+min_sf_buckling = np.min(buckling_sf[~np.isnan(buckling_sf)]) if np.any(~np.isnan(buckling_sf)) else 0
 
 if min_sf_yield < min_sf_buckling:
     min_sf = min_sf_yield
@@ -164,6 +164,7 @@ if min_sf_yield < min_sf_buckling:
 else:
     min_sf = min_sf_buckling
     yield_first = False
+
 
 ## Calculate total heat flux (integrates using trapezoidal revolved area)
 totHeatFluxInt = 0
