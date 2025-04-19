@@ -3,24 +3,38 @@ import matplotlib.pyplot as plt
 import re
 import pandas as pd
 from os import system
+import scipy as sp
 channel_arc_angle = None
 channel_width = None
 system('cls')
 
 ## Data input
 
-# material = 'AlSi10Mg'
+material = 'AlSi10Mg'
 # material = '6082-T6'
-material = 'Inconel718'
+# material = 'Inconel718'
 
-channel_dp = 40 # pressure difference across the firewall (bar) - assume to be constant
+# channel_dp = 40 # pressure difference across the firewall (bar) - assume to be constant
+channel_p = 40 # channel pressure (bar) - assume to be constant
 
-t_w = 1e-3 * 0.4 # wall thickness (m)
+t_w = 1e-3 * 0.5 # wall thickness (m)
 
 channel_arc_angle = 7.5 # deg
 # channel_width = 1e-3 * 0.4 # m
 
+chamber_stagnation_temp = 2556.6400
+pc = 30
+gamma = 1.2617
+
+def machfunc(mach, r, throat_area, gamma):
+    area_ratio = (np.pi*r**2) / throat_area
+    if mach == 0:
+        mach = 1e-7
+    return (area_ratio - ((1.0/mach) * ((1 + 0.5*(gamma-1)*mach*mach) / ((gamma + 1)/2))**((gamma+1) / (2*(gamma-1)))))
+
 ## Equations
+calc_gas_temp = np.vectorize(lambda Tc, gamma, mach: Tc / (1 + 0.5 * (gamma - 1) * mach**2))
+calc_gas_pressure = np.vectorize(lambda gas_temp, chamber_temp, pc, gamma: pc * (gas_temp / chamber_temp)**(gamma / (gamma - 1)))
 calc_channel_width_angle = lambda r, t_w, angle: 2 * (r + t_w) * np.sin(np.deg2rad(angle/2)) # m
 calc_tangential_thermal_stress = np.vectorize(lambda q, E, cte, t_w, v, k: (E * cte * q * t_w) / (2 * (1 - v) * k))
 calc_longitudinal_thermal_stress = np.vectorize(lambda firewall_t, coolant_wall_t, E, cte: E * cte * (firewall_t - coolant_wall_t))
@@ -68,6 +82,22 @@ throat_index = np.argmin(radius)
 axial_pos = (axial_pos - axial_pos[throat_index])
 min_pos = axial_pos[0]
 max_pos = axial_pos[-1]
+
+throat_area = np.pi * radius[throat_index]**2 # m^2
+
+gas_mach = np.zeros_like(radius)
+
+for idx, r in enumerate(radius):
+    if idx < throat_index:
+        m = sp.optimize.root_scalar(machfunc, bracket=[0, 1], args=(r, throat_area, gamma), method='brentq').root
+    if idx >= throat_index:
+        m = sp.optimize.root_scalar(machfunc, bracket=[1, 10], args=(r, throat_area, gamma), method='brentq').root
+    gas_mach[idx] = m
+
+gas_temp = calc_gas_temp(chamber_stagnation_temp, gamma, gas_mach) # K
+gas_pressure = calc_gas_pressure(gas_temp, chamber_stagnation_temp, pc, gamma) # Pa
+
+channel_dp = channel_p - gas_pressure
 
 def set_channel_width(radius, t_w, channel_arc_angle, channel_width):
     if channel_width is not None and channel_arc_angle is not None:
@@ -132,17 +162,16 @@ match material:
     case _:
         raise ValueError("Material not recognized. Please check the material name.")
 
-data_max_T = np.max([np.max(yield_temps), np.max(modulus_temps)])
-data_min_T = np.min([np.min(yield_temps), np.min(modulus_temps)])
-
-channel_width = set_channel_width(radius, t_w, channel_arc_angle, channel_width)
-
 youngs_modulus = np.zeros_like(firewall_temp)
 yield_strength = np.zeros_like(firewall_temp)
 
-valid_temps = (firewall_temp >= data_min_T) & (firewall_temp <= data_max_T)
-youngs_modulus[valid_temps] = np.interp(firewall_temp[valid_temps], modulus_temps, modulus)
-yield_strength[valid_temps] = np.interp(firewall_temp[valid_temps], yield_temps, yield_stress)
+channel_width = set_channel_width(radius, t_w, channel_arc_angle, channel_width)
+
+valid_temps_modulus = (firewall_temp >= np.min(modulus_temps)) & (firewall_temp <= np.max(modulus_temps))
+valid_temps_yield = (firewall_temp >= np.min(yield_temps)) & (firewall_temp <= np.max(yield_temps))
+
+youngs_modulus[valid_temps_modulus] = np.interp(firewall_temp[valid_temps_modulus], modulus_temps, modulus)
+yield_strength[valid_temps_yield] = np.interp(firewall_temp[valid_temps_yield], yield_temps, yield_stress)
 
 ## Calculations
 tangential_thermal_stress = calc_tangential_thermal_stress(q_total, youngs_modulus, cte, t_w, v, conductivity) # Pa
@@ -158,13 +187,16 @@ strain = np.divide(von_mises_stress, youngs_modulus, out=np.full_like(youngs_mod
 min_sf_yield = np.min(yield_sf[~np.isnan(yield_sf)]) if np.any(~np.isnan(yield_sf)) else 0
 min_sf_buckling = np.min(buckling_sf[~np.isnan(buckling_sf)]) if np.any(~np.isnan(buckling_sf)) else 0
 
+idx_valid = np.where((q_conv > 0) & ~np.isnan(yield_sf) & ~np.isnan(buckling_sf))[0]
+display_max_yield_sf = np.max(yield_sf[idx_valid]) if len(idx_valid) > 0 else np.max(yield_sf[~np.isnan(yield_sf)])
+display_max_buckling_sf = np.max(buckling_sf[idx_valid]) if len(idx_valid) > 0 else np.max(buckling_sf[~np.isnan(buckling_sf)])
+
 if min_sf_yield < min_sf_buckling:
     min_sf = min_sf_yield
     yield_first = True
 else:
     min_sf = min_sf_buckling
     yield_first = False
-
 
 ## Calculate total heat flux (integrates using trapezoidal revolved area)
 totHeatFluxInt = 0
@@ -188,6 +220,7 @@ ax1.plot(axial_pos*1e3, tangential_thermal_stress*1e-6, color="tab:pink", label=
 ax1.plot(axial_pos*1e3, longitudinal_thermal_stress*1e-6, color="tab:purple", label="Longitudinal Thermal Stress")
 ax1.plot(axial_pos*1e3, tangential_pressure_stress*1e-6, color="tab:orange", label="Tangential Pressure Stress")
 ax1.plot(axial_pos*1e3, von_mises_stress*1e-6, color="tab:red", label="Von Mises Stress")
+ax1.set_ylim(0, None)
 
 ax2.plot(axial_pos*1e3, youngs_modulus*1e-9, color="tab:blue", label="Young's Modulus")
 ax2.set_ylabel("Modulus (GPa)", color="tab:blue")
@@ -200,7 +233,7 @@ ax[0,0].grid()
 
 legend_lines = ax1.lines + ax2.lines
 legend_labels = [l.get_label() for l in legend_lines]
-ax1.legend(legend_lines, legend_labels, loc='best')
+ax1.legend(legend_lines, legend_labels, loc='center left')
 
 ax3 = ax[1,0]
 ax4 = ax3.twinx()
@@ -209,7 +242,7 @@ ax3.plot(axial_pos*1e3, firewall_temp, label="Firewall Temp", color="tab:orange"
 ax3.plot(axial_pos*1e3, coolant_wall_temp, label='Coolant Wall Temp', color="tab:blue")
 ax3.plot(axial_pos*1e3, coolant_temp, label='Coolant Temp', color="tab:green")
 
-ax4.plot(axial_pos*1e3, q_conv*1e-6, color="tab:red", label="Heat Flux")
+ax4.plot(axial_pos*1e3, q_total*1e-6, color="tab:red", label="Heat Flux")
 ax4.set_ylabel("Heat Flux (MW/m^2)", color="tab:red")
 ax4.set_ylim(0, None)
 
@@ -231,8 +264,9 @@ ax6.plot(axial_pos*1e3, buckling_sf, color="tab:blue", label="Safety Factor (Buc
 ax6.set_ylabel("Safety Factor (Buckling)", color="tab:blue")
 ax5.set_ylabel("Safety Factor (Yield)")
 ax5.set_xlabel("Axial Distance From Throat (mm)")
-ax6.set_ylim(0, None)
-ax5.set_ylim(0, None)
+margin = 1.1
+ax5.set_ylim(0, display_max_yield_sf * margin)
+ax6.set_ylim(0, display_max_buckling_sf * margin)
 ax5.set_xlim(min_pos*1e3, max_pos*1e3)
 ax5.grid()
 if yield_first:
