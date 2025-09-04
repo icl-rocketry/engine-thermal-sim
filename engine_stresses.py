@@ -4,11 +4,12 @@ import re
 import pandas as pd
 from os import system
 import scipy as sp
+from scipy.interpolate import PchipInterpolator
 channel_arc_angle = None
 channel_width = None
 firewall_dp = None
 channel_pressure = None
-# system('cls')
+system('cls')
 
 ## Data input - WARNING: Garbage in, garbage out - ensure you've entered the correct data
 
@@ -18,18 +19,19 @@ material = 'AlSi10Mg'
 # material = 'ABD900'
 # material = 'GRCop-42'
 
-# firewall_dp = 40 # pressure difference across the firewall (bar) - assume to be constant
-channel_pressure = 70 # channel pressure (bar) - assume to be constant - calculates firewall dp from hot gas side pressure
+# firewall_dp = 40 # pressure difference across the firewall (bar) - assumed to be constant
+channel_pressure = 48 # channel pressure (bar) - assumed to be constant - calculates firewall dp from hot gas side pressure
 
 t_w = 1e-3 * 0.7 # wall thickness (m)
+h_channel = 1e-3 * 1.5 # channel height (m) - only used for CSJ thermal expansion
 
 channel_arc_angle = 3.3 # deg
-# channel_width = 1e-3 * 1 # m
+# channel_width = 1e-3 * 0.5 # m
 
 # Only needed if using channel_pressure
-chamber_stagnation_temp = 3205.9829
-pc = 30
-gamma = 1.2473
+chamber_stagnation_temp = 2373.0827
+pc = 31.8
+gamma = 1.2715
 
 ## Equations
 calc_gas_temp = np.vectorize(lambda Tc, gamma, mach: Tc / (1 + 0.5 * (gamma - 1) * mach**2))
@@ -78,6 +80,11 @@ coolant_velocity = df["coolant_velocity"].to_numpy(dtype=np.float64) # m/s
 coolant_density = df["coolant_density"].to_numpy(dtype=np.float64) # kg/m^3
 
 throat_index = np.argmin(radius)
+
+chamber_radius = radius[0]
+chamber_index_mask = np.where(radius[:throat_index+1] == chamber_radius)[0]
+mid_chamber_index = chamber_index_mask[len(chamber_index_mask) // 2]
+
 axial_pos = (axial_pos - axial_pos[throat_index])
 min_pos = axial_pos[0]
 max_pos = axial_pos[-1]
@@ -121,12 +128,21 @@ def set_channel_width(radius, t_w, channel_arc_angle, channel_width):
     else:
         return np.full_like(radius, channel_width)
 
+thermal_strain_coolant_wall = None
+
 match material:
     case 'AlSi10Mg':
-        modulus_temps = np.array([-100, 25, 50, 100, 150, 200, 250, 300, 350, 400]) + 273.15 # E Temps (K)
-        modulus = np.array([77.6, 77.6, 75.5, 72.8, 63.2, 60, 55, 45, 37, 28]) * 1e9 # E (Pa)
-        yield_temps = np.array([-100, 25, 50, 100, 150, 200, 250, 300, 350, 400]) + 273.15 # Ys Temps (K)
-        yield_stress = np.array([204, 204, 198, 181, 182, 158, 132, 70, 30, 12]) * 1e6 # Ys (Pa)
+        # modulus_temps = np.array([-100, 25, 50, 100, 150, 200, 250, 300, 350, 400]) + 273.15 # E Temps (K)
+        # modulus = np.array([77.6, 77.6, 75.5, 72.8, 63.2, 60, 55, 45, 37, 28]) * 1e9 # E (Pa)
+        # yield_temps = np.array([-100, 25, 50, 100, 150, 200, 250, 300, 350, 400]) + 273.15 # Ys Temps (K)
+        # yield_stress = np.array([204, 204, 198, 181, 182, 158, 132, 70, 30, 12]) * 1e6 # Ys (Pa)
+
+        # Remove anamolous data points
+        modulus_temps = np.array([-73.15, 25, 150, 200, 250, 300, 350, 400]) + 273.15 # E temps (deg C)
+        modulus = np.array([77.6, 77.6, 63.2, 60, 55, 45, 37, 28]) * 1e9 # E values (Pa)
+        yield_temps = np.array([200, 298, 423, 473, 523, 573, 623, 673]) # Yield stress temps (deg C)
+        yield_stress = np.array([204, 204, 182, 158, 132, 70, 30, 12]) * 1e6 # Yield stress values (Pa)
+
         fracture_elongation_temps = np.array([-100, 25, 50, 100, 150, 200, 250, 300, 350, 400]) + 273.15 # Fracture Elongation Temps (K)
         fracture_elongation = np.array([7.2, 7.2, 8.5, 10.0, 14.7, 16.4, 30.9, 41.4, 53.8, 57.4]) * 1e-2 # Fracture Elongation
         conductivity = 130 # thermal conductivity (W/mK)
@@ -138,11 +154,13 @@ match material:
         uts_0 = 310e6 # Ultimate tensile strength at room temp (for under 6mm thickness)
         v = 0.3 # Poisson's ratio
         conductivity = 0.07*(firewall_temp-273.15) + 190
+        thermal_strain_coolant_wall = 0.1e-7*(coolant_wall_temp-273.15)**2 + 22.5e-6*(coolant_wall_temp-273.15) - 4.5e-4 # Relative thermal strain (compared to 20 deg C)
         cte = 0.2e-7*(firewall_temp-273.15) + 22.5e-6
+
         modulus_temps = np.array([-200, 20, 50, 100, 150, 200, 250, 300, 350, 400, 550]) + 273.15 # E Temps (K)
         modulus = np.array([70, 70, 69.3, 67.9, 65.1, 60.2, 54.6, 47.6, 37.8, 28.0, 0]) * 1e9 # E
         yield_temps = np.array([-200, 20, 100, 150, 200, 250, 300, 350, 550]) + 273.15 # Ys Temps (K)
-        yield_stress = np.array([1, 1, 0.90, 0.79, 0.65, 0.38, 0.20, 0.11, 0]) * ys_0 # Ys
+        yield_stress = np.array([1, 1, 0.90, 0.79, 0.65, 0.38, 0.20, 0.11, 0]) * ys_0 # Ys (for thermal exposure up to 2 hrs)
         fracture_elongation = None
 
     case 'Inconel718':
@@ -183,11 +201,43 @@ yield_strength = np.zeros_like(firewall_temp)
 
 channel_width = set_channel_width(radius, t_w, channel_arc_angle, channel_width)
 
-valid_temps_modulus = (firewall_temp >= np.min(modulus_temps)) & (firewall_temp <= np.max(modulus_temps))
-valid_temps_yield = (firewall_temp >= np.min(yield_temps)) & (firewall_temp <= np.max(yield_temps))
+# Evaluate at all points using extrapolation where needed
+youngs_modulus = PchipInterpolator(modulus_temps, modulus, extrapolate=True)(firewall_temp)
+yield_strength = PchipInterpolator(yield_temps, yield_stress, extrapolate=True)(firewall_temp)
 
-youngs_modulus[valid_temps_modulus] = np.interp(firewall_temp[valid_temps_modulus], modulus_temps, modulus)
-yield_strength[valid_temps_yield] = np.interp(firewall_temp[valid_temps_yield], yield_temps, yield_stress)
+# Identify regions using extrapolated data
+extrapolated_modulus = (firewall_temp < np.min(modulus_temps)) | (firewall_temp > np.max(modulus_temps))
+extrapolated_yield = (firewall_temp < np.min(yield_temps)) | (firewall_temp > np.max(yield_temps))
+extrapolated_either = extrapolated_modulus | extrapolated_yield
+
+def highlight_extrapolated_regions(ax, axial_pos, extrapolated_mask, first_label=True):
+    """
+    Add vertical spans to highlight extrapolated regions on a plot.
+    
+    Args:
+        ax: matplotlib axis object
+        axial_pos: axial position array (in mm)
+        extrapolated_mask: boolean array indicating extrapolated points
+        first_label: whether to add label (only for first occurrence)
+    """
+    if not np.any(extrapolated_mask):
+        return
+    
+    extrap_regions = np.where(extrapolated_mask)[0]
+    if len(extrap_regions) == 0:
+        return
+    
+    # Find continuous regions
+    diff = np.diff(extrap_regions)
+    breaks = np.where(diff > 1)[0]
+    starts = np.concatenate(([0], breaks + 1))
+    ends = np.concatenate((breaks, [len(extrap_regions) - 1]))
+    
+    for i, (start, end) in enumerate(zip(starts, ends)):
+        x_start = axial_pos[extrap_regions[start]]
+        x_end = axial_pos[extrap_regions[end]]
+        label = 'Extrapolated Data' if (first_label and i == 0) else ""
+        ax.axvspan(x_start, x_end, alpha=0.2, color='red', label=label)
 
 ## Calculations
 tangential_thermal_stress = calc_tangential_thermal_stress(q_total, youngs_modulus, cte, t_w, v, conductivity) # Pa
@@ -259,6 +309,7 @@ ax1.plot(axial_pos*1e3, tangential_thermal_stress*1e-6, color="tab:pink", label=
 ax1.plot(axial_pos*1e3, longitudinal_thermal_stress*1e-6, color="tab:purple", label="Longitudinal Thermal Stress")
 ax1.plot(axial_pos*1e3, tangential_pressure_stress*1e-6, color="tab:orange", label="Tangential Pressure Stress")
 ax1.plot(axial_pos*1e3, von_mises_stress*1e-6, color="tab:red", label="Von Mises Stress")
+
 ax1.set_ylim(0, None)
 
 ax2.plot(axial_pos*1e3, youngs_modulus*1e-9, color="tab:blue", label="Young's Modulus")
@@ -272,7 +323,7 @@ ax[0,0].grid()
 
 legend_lines = ax1.lines + ax2.lines
 legend_labels = [l.get_label() for l in legend_lines]
-ax1.legend(legend_lines, legend_labels, loc='upper center', ncol=2)
+ax1.legend(legend_lines, legend_labels, loc='best', ncol=2)
 
 ax3 = ax[1,0]
 ax4 = ax3.twinx()
@@ -298,15 +349,12 @@ ax3.legend(legend_lines, legend_labels, loc='upper left')
 axial_pos_mm = axial_pos * 1e3
 
 ax5 = ax[0,1]
-# ax6 = ax5.twinx()
 ax5.plot(axial_pos*1e3, yield_sf, color="tab:red", label="Safety Factor (Yield)")
-# ax6.plot(axial_pos*1e3, buckling_sf, color="tab:blue", label="Safety Factor (Buckling)")
-# ax6.set_ylabel("Safety Factor (Buckling)", color="tab:blue")
+
 ax5.set_ylabel("Safety Factor (Yield)")
 ax5.set_xlabel("Axial Distance From Throat (mm)")
 margin = 1.1
 ax5.set_ylim(0, display_max_yield_sf * margin)
-# ax6.set_ylim(0, display_max_buckling_sf * margin)
 ax5.set_xlim(min_pos*1e3, max_pos*1e3)
 ax5.grid()
 if yield_first:
@@ -314,16 +362,16 @@ if yield_first:
     ax5.axhline(y=min_sf, color='tab:red', linestyle='--', label="Minimum Safety Factor")
 else:
     ax5.set_title(f"Minimum Safety Factor: {min_sf:.3f} by Buckling")
-    # ax6.axhline(y=min_sf, color='tab:blue', linestyle='--', label="Minimum Safety Factor")
-legend_lines = ax5.lines # + ax6.lines
+legend_lines = ax5.lines
 legend_labels = [l.get_label() for l in legend_lines]
-ax5.legend(legend_lines, legend_labels, loc='upper center')
+ax5.legend(legend_lines, legend_labels, loc='best')
 
 ax7 = ax[1,1]
 ax7.plot(axial_pos*1e3, tangential_thermal_strain*1e2, color="tab:pink", label="Tangential Thermal Strain")
 ax7.plot(axial_pos*1e3, tangential_pressure_strain*1e2, color="tab:orange", label="Tangential Pressure Strain")
 ax7.plot(axial_pos*1e3, longitudinal_strain*1e2, color="tab:purple", label="Longitudinal Strain")
 ax7.plot(axial_pos*1e3, eff_cyclic_strain*1e2, color="tab:red", label="Effective Cyclic Strain")
+
 ax7.set_ylabel("Strain (%)")
 ax7.set_xlabel("Axial Distance From Throat (mm)")
 ax7.set_xlim(min_pos*1e3, max_pos*1e3)
@@ -331,7 +379,14 @@ ax7.set_ylim(0, None)
 ax7.grid()
 ax7.set_title(f"Max Effective Cyclic Strain: {np.nanmax(eff_cyclic_strain*1e2):.4f} %")
 ax7.axhline(y=np.nanmax(eff_cyclic_strain*1e2), color='tab:red', linestyle='--', label="Max Effective Cyclic Strain")
-ax7.legend(loc='upper left')
+ax7.legend(loc='best')
+
+# Add extrapolated region highlighting to all main plot axes
+main_axes = [ax1, ax3, ax5, ax7]
+for i, axis in enumerate(main_axes):
+    highlight_extrapolated_regions(axis, axial_pos*1e3, extrapolated_either, first_label=(i == 0))
+
+fig.tight_layout()
 
 # Add radius to each subplot
 for i in range(2):
@@ -340,6 +395,99 @@ for i in range(2):
         ax_twin.plot(axial_pos*1e3, radius, color="tab:gray", alpha=1)
         ax_twin.set_ylim(0, np.max(radius)*4)
         ax_twin.get_yaxis().set_visible(False)
+
+if thermal_strain_coolant_wall is not None:
+    radial_expansion = thermal_strain_coolant_wall * (radius + t_w + h_channel)
+    axial_expansion = np.zeros(len(radius)-1)
+    cumulative_axial_expansion = np.zeros_like(thermal_strain_coolant_wall)
+    dx = np.zeros_like(thermal_strain_coolant_wall)
+    dr = np.zeros_like(thermal_strain_coolant_wall)
+    conv_angle = np.zeros_like(thermal_strain_coolant_wall)
+
+    for i in range(len(axial_pos)-1):
+        dx[i] = axial_pos[i+1] - axial_pos[i]
+        dr[i] = radius[i+1] - radius[i]
+
+        axial_expansion[i] = thermal_strain_coolant_wall[i] * dx[i]
+        cumulative_axial_expansion[i+1] = cumulative_axial_expansion[i] + axial_expansion[i]
+
+    throat_thermal_strain = thermal_strain_coolant_wall[throat_index]
+    chamber_thermal_strain = thermal_strain_coolant_wall[mid_chamber_index]
+    throat_expansion = radial_expansion[throat_index]
+    chamber_expansion = radial_expansion[mid_chamber_index]
+
+    print(f"\nThroat Thermal Strain: {throat_thermal_strain:.4e}")
+    print(f"Chamber Thermal Strain: {chamber_thermal_strain:.4e}")
+    print(f"\nThroat Radial Expansion: {throat_expansion*1e3:.4f} mm")
+    print(f"Chamber Radial Expansion: {chamber_expansion*1e3:.4f} mm")
+    print(f"\nTotal Axial Expansion: {np.max(cumulative_axial_expansion)*1e3:.4f} mm")
+
+    fig_exp, (ax_rad, ax_axial, ax_th_strain) = plt.subplots(3, 1, figsize=(9, 8), sharex=True)
+    fig_exp.suptitle("Chamber Liner Thermal Expansion")
+
+    # Radial expansion
+    ax_rad.plot(axial_pos_mm, radial_expansion * 1e3, color="tab:blue")
+    ax_rad.axvline(x=0, color='black', linestyle='--')
+    
+    # Highlight extrapolated regions
+    if np.any(extrapolated_either):
+        extrap_regions = np.where(extrapolated_either)[0]
+        if len(extrap_regions) > 0:
+            diff = np.diff(extrap_regions)
+            breaks = np.where(diff > 1)[0]
+            starts = np.concatenate(([0], breaks + 1))
+            ends = np.concatenate((breaks, [len(extrapolated_either) - 1]))
+            
+            for start, end in zip(starts, ends):
+                x_start = axial_pos[extrapolated_either[start]] * 1e3
+                x_end = axial_pos[extrapolated_either[end]] * 1e3
+                ax_rad.axvspan(x_start, x_end, alpha=0.2, color='red', label='Extrapolated Data' if start == 0 else "")
+    
+    ax_rad.set_ylabel("Thermal Expansion (mm)")
+    ax_rad.set_ylim(0, None)
+    ax_rad.grid()
+    ax_rad.set_xlim(min_pos*1e3, max_pos*1e3)
+    ax_rad.set_title("Radial Thermal Expansion")
+    ax_rad_twin = ax_rad.twinx()
+    ax_rad_twin.plot(axial_pos_mm, radius, color="tab:gray", alpha=1)
+    ax_rad_twin.set_ylim(0, np.max(radius)*3)
+    ax_rad_twin.get_yaxis().set_visible(False)
+
+    # Axial expansion
+    ax_axial.plot(axial_pos_mm, cumulative_axial_expansion * 1e3, color="tab:orange")
+    ax_axial.axvline(x=0, color='black', linestyle='--')
+    
+    ax_axial.set_xlabel("Axial Distance From Throat (mm)")
+    ax_axial.set_ylabel("Thermal Expansion (mm)")
+    ax_axial.set_ylim(0, None)
+    ax_axial.grid()
+    ax_axial.set_xlim(min_pos*1e3, max_pos*1e3)
+    ax_axial.set_title("Cumulative Axial Thermal Expansion")
+    ax_axial_twin = ax_axial.twinx()
+    ax_axial_twin.plot(axial_pos_mm, radius, color="tab:gray", alpha=1)
+    ax_axial_twin.set_ylim(0, np.max(radius)*3)
+    ax_axial_twin.get_yaxis().set_visible(False)
+
+    # Thermal strain
+    ax_th_strain.plot(axial_pos_mm, thermal_strain_coolant_wall * 1e3, color="tab:green")
+    ax_th_strain.axvline(x=0, color='black', linestyle='--')
+    
+    ax_th_strain.set_xlabel("Axial Distance From Throat (mm)")
+    ax_th_strain.set_ylabel("Thermal Strain (x1e-3)")
+    ax_th_strain.grid()
+    ax_th_strain.set_xlim(min_pos*1e3, max_pos*1e3)
+    ax_th_strain.set_title("Thermal Strain")
+    ax_th_strain_twin = ax_th_strain.twinx()
+    ax_th_strain_twin.plot(axial_pos_mm, radius, color="tab:gray", alpha=1)
+    ax_th_strain_twin.set_ylim(0, np.max(radius)*3)
+    ax_th_strain_twin.get_yaxis().set_visible(False)
+
+    # Add extrapolated region highlighting to thermal expansion plot axes
+    thermal_axes = [ax_rad, ax_axial, ax_th_strain]
+    for i, axis in enumerate(thermal_axes):
+        highlight_extrapolated_regions(axis, axial_pos*1e3, extrapolated_either, first_label=(i == 0))
+
+    fig_exp.tight_layout()
 
 plt.tight_layout()
 plt.show()
